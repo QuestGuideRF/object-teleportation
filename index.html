@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Телепортация мягких тел</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: white;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Загрузка WASM...</div>
+    <script src="js/three.min.js"></script>
+    <script src="js/dat.gui.min.js"></script>
+    <script src="js/OrbitControls.js"></script>
+    <script type="module">
+        import init, { MeshHandle } from './wasm/pkg/wasm.js';
+        let scene, camera, renderer, controls;
+        let meshHandle;
+        let particlesObject, particlesObject2, particlesObject4;
+        let linesObject, linesObject2, linesObject4;
+        let circle1Object, circle2Object, circle1TeleportedObject, circle2TeleportedObject;
+        let gridHelper, axesHelper;
+        let coordinateLabels = [];
+        let wasmMemory;
+        let particleDataArray;
+        let lineIndicesArray;
+        let disabledLinesArray;
+        let circle1DataArray;
+        let circle2DataArray;
+        const MAX_PARTICLES = 22500;
+        const MAX_LINES = 354620;
+        const constants = {
+            dt: 0.001,
+            edgeSpringConstant: 50,
+            dampingCoefficient: 10.0,
+            globalDamping: 0.01,
+            iterations: 30,
+            scene_size: 30,
+            scene_scale: 1.,
+            scene_offset_x: -4.,
+            scene_offset_y: 0.,
+            scene_speed_x: 0.5,
+            scene_speed_y: 0.,
+            scene_portal_type: 0.,
+            scene_portal1_x: -1.5,
+            scene_portal1_y: 0.,
+            scene_portal1_angle: 0.,
+            scene_portal2_x: 1.5,
+            scene_portal2_y: 0.,
+            scene_portal2_angle: 0.,
+            scene_mirror_portals: 1.,
+        };
+        const guidata = {
+            run_simulation: false,
+            scene: "default",
+            particleSize: 2.5,
+            particleColor: '#0ea100',
+            line2Color: '#931f1f',
+            line4Color: '#5032cc',
+            lineWidth: 1,
+            circle1Color: '#ff8800',
+            circle2Color: '#0088ff',
+            showDebugGrid: false,
+            cameraScale: 5.0,
+            draw_reflections: true,
+        };
+        const guidata_copy = {
+            guidata_particleSize: guidata["particleSize"],
+            guidata_particleColor: guidata["particleColor"],
+            guidata_line2Color: guidata["line2Color"],
+            guidata_line4Color: guidata["line4Color"],
+            guidata_lineWidth: guidata["lineWidth"],
+            guidata_circle1Color: guidata["circle1Color"],
+            guidata_circle2Color: guidata["circle2Color"],
+        };
+        function initializeArrays() {
+            particleDataArray = new Float32Array(MAX_PARTICLES * 2);
+            lineIndicesArray = new Uint32Array(MAX_LINES * 2);
+            disabledLinesArray = new Uint8Array(MAX_LINES);
+            circle1DataArray = new Float32Array(3);
+            circle2DataArray = new Float32Array(3);
+        }
+        function copyWasmData(wasmPtr, targetArray, elementCount) {
+            const wasmView = new targetArray.constructor(
+                wasmMemory.buffer,
+                wasmPtr,
+                elementCount
+            );
+            targetArray.set(wasmView.subarray(0, elementCount));
+        }
+        const scenes = {
+            "default": {
+                ...constants,
+                ...guidata_copy,
+            },
+            "rigid": {
+                ...constants,
+                ...guidata_copy,
+                edgeSpringConstant: 500.,
+                guidata_particleColor: "#cfca09",
+            },
+            "более жесткий": {
+                ...constants,
+                ...guidata_copy,
+                edgeSpringConstant: 1000.,
+                guidata_particleColor: "#c00000",
+            },
+            "big": {
+                ...constants,
+                ...guidata_copy,
+                scene_offset_x: -4.5,
+                scene_scale: 2.,
+            },
+            "еще больше": {
+                ...constants,
+                ...guidata_copy,
+                scene_scale: 4.,
+                scene_offset_x: -6.,
+                scene_speed_x: 2.,
+            },
+            "больший жесткий": {
+                ...constants,
+                ...guidata_copy,
+                scene_scale: 4.,
+                scene_offset_x: -6.,
+                scene_speed_x: 2.,
+                edgeSpringConstant: 500.,
+                guidata_particleColor: "#cfca09",
+            },
+            "refraction": {
+                ...constants,
+                ...guidata_copy,
+                scene_offset_x: -3.5,
+                scene_offset_y: -1.3,
+            },
+            "reflection": {
+                ...constants,
+                ...guidata_copy,
+                edgeSpringConstant: 500.,
+                scene_offset_x: -3.5,
+                scene_offset_y: -1.,
+                guidata_particleColor: "#cfca09",
+            },
+            "small": {
+                ...constants,
+                ...guidata_copy,
+                scene_offset_x: -2.55,
+                scene_scale: 0.01,
+                iterations: 1,
+            },
+            "нет пружин": {
+                ...constants,
+                ...guidata_copy,
+                edgeSpringConstant: 0.,
+                dampingCoefficient: 0.1,
+                guidata_particleColor: "#ffffff",
+            },
+            "inside": {
+                ...constants,
+                ...guidata_copy,
+                scene_offset_x: -1.5,
+            },
+            "kiss": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal1_x: -1.01,
+                scene_portal2_x: 1.01,
+                scene_portal1_angle: 1.,
+            },
+            "поцелуй 2": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal1_x: -1.01,
+                scene_portal2_x: 1.01,
+                scene_portal1_angle: 1.,
+                scene_offset_x: 0.,
+                scene_offset_y: 1.5,
+                scene_speed_x: 0.,
+                scene_speed_y: -0.5,
+            },
+            "monoportal": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal1_x: 0.,
+                scene_portal2_x: 0.,
+                scene_offset_x: -2.,
+            },
+            "монопортальный внутри": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal1_x: 0.,
+                scene_portal2_x: 0.,
+                scene_offset_x: 0.,
+            },
+            "неправильный перекрёсток": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal1_x: -0.95,
+                scene_portal2_x: 0.95,
+                scene_portal1_angle: 1.,
+            },
+            "обычный портал": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal_type: 2.,
+                scene_mirror_portals: 0.,
+                guidata_circle1Color: "#8b8b8b",
+                guidata_circle2Color: "#ffffff",
+            },
+            "перспективный портал": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal_type: 1.,
+                guidata_circle1Color: "#12ff00",
+                guidata_circle2Color: "#ff002e",
+            },
+            "перспективный портал, без пружин": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal_type: 1.,
+                edgeSpringConstant: 0.,
+                dampingCoefficient: 0.1,
+                guidata_particleColor: "#ffffff",
+                guidata_circle1Color: "#12ff00",
+                guidata_circle2Color: "#ff002e",
+            },
+            "перспективный портал, вращение": {
+                ...constants,
+                ...guidata_copy,
+                scene_portal_type: 1.,
+                edgeSpringConstant: 420.,
+                scene_offset_x: -3.5,
+                scene_offset_y: -1.13,
+                guidata_circle1Color: "#12ff00",
+                guidata_circle2Color: "#ff002e",
+                guidata_particleColor: "#cfca09",
+            },
+        };
+        function initScene() {
+            for (const [name, scene] of Object.entries(scenes)) {
+                if (guidata.scene == name) {
+                    for (const [key, value] of Object.entries(scene)) {
+                        if (key.startsWith("guidata_")) {
+                            guidata[key.slice("guidata_".length)] = value;
+                        } else {
+                            constants[key] = value;
+                            meshHandle.set_constant(key, value);
+                        }
+                    }
+                    break;
+                }
+            }
+            particlesObject.material.color.set(guidata.particleColor);
+            particlesObject2.material.color.set(guidata.line2Color);
+            particlesObject4.material.color.set(guidata.line4Color);
+            linesObject.material.color.set(guidata.particleColor);
+            linesObject2.material.color.set(guidata.line2Color);
+            linesObject4.material.color.set(guidata.line4Color);
+            circle1Object.material.color.set(guidata.circle1Color);
+            circle1Object.children[0].material.color.set(guidata.circle1Color);
+            circle1TeleportedObject.material.color.set(guidata.circle1Color);
+            circle1TeleportedObject.children[0].material.color.set(guidata.circle1Color);
+            circle2Object.material.color.set(guidata.circle2Color);
+            circle2Object.children[0].material.color.set(guidata.circle2Color);
+            circle2TeleportedObject.material.color.set(guidata.circle2Color);
+            circle2TeleportedObject.children[0].material.color.set(guidata.circle2Color);
+            meshHandle.init();
+            updateVisualization();
+        }
+        async function init2() {
+            try {
+                const wasmModule = await init();
+                wasmMemory = wasmModule.memory;
+                initializeArrays();
+                document.getElementById('loading').style.display = 'none';
+                scene = new THREE.Scene();
+                scene.background = new THREE.Color(0x111111);
+                const aspect = window.innerWidth / window.innerHeight;
+                const frustumSize = guidata.cameraScale;
+                camera = new THREE.OrthographicCamera(
+                    -frustumSize * aspect / 2,
+                    frustumSize * aspect / 2,
+                    frustumSize / 2,
+                    -frustumSize / 2,
+                    -1000,
+                    1000
+                );
+                camera.position.z = 1;
+                renderer = new THREE.WebGLRenderer({ antialias: true });
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                renderer.setPixelRatio(window.devicePixelRatio);
+                document.body.appendChild(renderer.domElement);
+                const light = new THREE.AmbientLight(0xffffff, 1.0);
+                scene.add(light);
+                controls = new THREE.OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.25;
+                controls.enableRotate = false;
+                controls.screenSpacePanning = true;
+                controls.mouseButtons = {
+                    LEFT: THREE.MOUSE.PAN,
+                    MIDDLE: THREE.MOUSE.DOLLY,
+                    RIGHT: THREE.MOUSE.PAN
+                };
+                meshHandle = new MeshHandle();
+                for (const name in constants) {
+                    meshHandle.set_constant(name, constants[name]);
+                }
+                createDebugHelpers();
+                createVisualizationObjects();
+                setupGUI();
+                window.addEventListener('resize', onWindowResize);
+                initScene();
+                updateVisualization();
+                animate();
+            } catch (error) {
+                console.error("Ошибка инициализации приложения:", error);
+                document.getElementById('loading').textContent =
+                    'Ошибка загрузки WASM: ' + error.message;
+            }
+        }
+        function createDebugHelpers() {
+            gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
+            gridHelper.rotation.x = Math.PI / 2;
+            gridHelper.visible = guidata.showDebugGrid;
+            scene.add(gridHelper);
+            axesHelper = new THREE.AxesHelper(1);
+            axesHelper.visible = guidata.showDebugGrid;
+            scene.add(axesHelper);
+            createCoordinateLabels();
+        }
+        function createCoordinateLabels() {
+            coordinateLabels.forEach(label => scene.remove(label));
+            coordinateLabels = [];
+            if (!guidata.showDebugGrid) return;
+            for (let x = -5; x <= 5; x += 1) {
+                for (let y = -5; y <= 5; y += 1) {
+                    if (x === 0 && y === 0) continue;
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 64;
+                    canvas.height = 64;
+                    const context = canvas.getContext('2d');
+                    context.font = '20 пикселей Ариал';
+                    context.fillStyle = '#ffffff';
+                    context.strokeStyle = '#000000';
+                    context.lineWidth = 2;
+                    context.textAlign = 'center';
+                    context.textBaseline = 'middle';
+                    const text = `${x},${y}`;
+                    context.strokeText(text, canvas.width / 2, canvas.height / 2);
+                    context.fillText(text, canvas.width / 2, canvas.height / 2);
+                    const texture = new THREE.CanvasTexture(canvas);
+                    texture.needsUpdate = true;
+                    const material = new THREE.SpriteMaterial({ map: texture });
+                    const sprite = new THREE.Sprite(material);
+                    sprite.position.set(x, y, 0.1);
+                    sprite.scale.set(0.2, 0.2, 1);
+                    sprite.visible = guidata.showDebugGrid;
+                    scene.add(sprite);
+                    coordinateLabels.push(sprite);
+                }
+            }
+        }
+        function createVisualizationObjects() {
+            if (particlesObject) scene.remove(particlesObject);
+            if (particlesObject2) scene.remove(particlesObject2);
+            if (particlesObject4) scene.remove(particlesObject4);
+            if (linesObject) scene.remove(linesObject);
+            if (linesObject2) scene.remove(linesObject2);
+            if (linesObject4) scene.remove(linesObject4);
+            if (circle1Object) scene.remove(circle1Object);
+            if (circle2Object) scene.remove(circle2Object);
+            if (circle1TeleportedObject) scene.remove(circle1Object);
+            if (circle2TeleportedObject) scene.remove(circle2Object);
+            createLines();
+            createParticles();
+            createCircles();
+        }
+        function createParticles() {
+            let particleCount = meshHandle.get_particles_count();
+            if (guidata.draw_reflections) {
+                particleCount /= 3;
+            }
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const material = new THREE.PointsMaterial({
+                color: guidata.particleColor,
+                size: guidata.particleSize,
+                sizeAttenuation: false
+            });
+            particlesObject = new THREE.Points(geometry, material);
+            particlesObject.frustumCulled = false;
+            scene.add(particlesObject);
+            const geometry2 = new THREE.BufferGeometry();
+            const positions2 = new Float32Array(particleCount * 3);
+            geometry2.setAttribute('position', new THREE.BufferAttribute(positions2, 3));
+            const material2 = new THREE.PointsMaterial({
+                color: guidata.line2Color,
+                size: guidata.particleSize,
+                sizeAttenuation: false
+            });
+            particlesObject2 = new THREE.Points(geometry2, material2);
+            particlesObject2.frustumCulled = false;
+            scene.add(particlesObject2);
+            const geometry4 = new THREE.BufferGeometry();
+            const positions4 = new Float32Array(particleCount * 3);
+            geometry4.setAttribute('position', new THREE.BufferAttribute(positions4, 3));
+            const material4 = new THREE.PointsMaterial({
+                color: guidata.line4Color,
+                size: guidata.particleSize,
+                sizeAttenuation: false
+            });
+            particlesObject4 = new THREE.Points(geometry4, material4);
+            particlesObject4.frustumCulled = false;
+            scene.add(particlesObject4);
+        }
+        function createLines() {
+            const lineCount = meshHandle.get_lines_count();
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(lineCount * 2 * 3);
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            const material = new THREE.LineBasicMaterial({
+                color: guidata.particleColor,
+                linewidth: guidata.lineWidth
+            });
+            linesObject = new THREE.LineSegments(geometry, material);
+            linesObject.frustumCulled = false;
+            scene.add(linesObject);
+            const geometry2 = new THREE.BufferGeometry();
+            const positions2 = new Float32Array(lineCount * 2 * 3);
+            geometry2.setAttribute('position', new THREE.BufferAttribute(positions2, 3));
+            const material2 = new THREE.LineBasicMaterial({
+                color: guidata.line2Color,
+                linewidth: guidata.lineWidth
+            });
+            linesObject2 = new THREE.LineSegments(geometry2, material2);
+            linesObject2.frustumCulled = false;
+            scene.add(linesObject2);
+            const geometry4 = new THREE.BufferGeometry();
+            const positions4 = new Float32Array(lineCount * 2 * 3);
+            geometry4.setAttribute('position', new THREE.BufferAttribute(positions4, 3));
+            const material4 = new THREE.LineBasicMaterial({
+                color: guidata.line4Color,
+                linewidth: guidata.lineWidth
+            });
+            linesObject4 = new THREE.LineSegments(geometry4, material4);
+            linesObject4.frustumCulled = false;
+            scene.add(linesObject4);
+        }
+        function createCircles() {
+            let circleLines = 128;
+            const circle1Geometry = new THREE.CircleGeometry(1, circleLines);
+            const circle1Material = new THREE.MeshBasicMaterial({
+                color: guidata.circle1Color,
+                transparent: true,
+                opacity: 0.2,
+                side: THREE.DoubleSide
+            });
+            circle1Object = new THREE.Mesh(circle1Geometry, circle1Material);
+            scene.add(circle1Object);
+            const circle2Geometry = new THREE.CircleGeometry(1, circleLines);
+            const circle2Material = new THREE.MeshBasicMaterial({
+                color: guidata.circle2Color,
+                transparent: true,
+                opacity: 0.2,
+                side: THREE.DoubleSide
+            });
+            circle2Object = new THREE.Mesh(circle2Geometry, circle2Material);
+            scene.add(circle2Object);
+            const wireframe1Material = new THREE.RingGeometry(0.99, 1.01, circleLines);
+            const wireframe1Mesh = new THREE.Mesh(wireframe1Material, new THREE.MeshBasicMaterial({
+                color: guidata.circle1Color,
+                transparent: true,
+                opacity: 0.8
+            }));
+            circle1Object.add(wireframe1Mesh);
+            const wireframe2Material = new THREE.RingGeometry(0.99, 1.01, circleLines);
+            const wireframe2Mesh = new THREE.Mesh(wireframe2Material, new THREE.MeshBasicMaterial({
+                color: guidata.circle2Color,
+                transparent: true,
+                opacity: 0.8
+            }));
+            circle2Object.add(wireframe2Mesh);
+            {
+                const circle1TeleportedGeometry = new THREE.CircleGeometry(1, circleLines);
+                const circle1TeleportedMaterial = new THREE.MeshBasicMaterial({
+                    color: guidata.circle1TeleportedColor,
+                    transparent: true,
+                    opacity: 0.2,
+                    side: THREE.DoubleSide
+                });
+                circle1TeleportedObject = new THREE.Mesh(circle1TeleportedGeometry, circle1TeleportedMaterial);
+                scene.add(circle1TeleportedObject);
+                const circle2TeleportedGeometry = new THREE.CircleGeometry(1, circleLines);
+                const circle2TeleportedMaterial = new THREE.MeshBasicMaterial({
+                    color: guidata.circle2TeleportedColor,
+                    transparent: true,
+                    opacity: 0.2,
+                    side: THREE.DoubleSide
+                });
+                circle2TeleportedObject = new THREE.Mesh(circle2TeleportedGeometry, circle2TeleportedMaterial);
+                scene.add(circle2TeleportedObject);
+                const wireframe1Material = new THREE.RingGeometry(0.99, 1.01, circleLines);
+                const wireframe1Mesh = new THREE.Mesh(wireframe1Material, new THREE.MeshBasicMaterial({
+                    color: guidata.circle1TeleportedColor,
+                    transparent: true,
+                    opacity: 0.8
+                }));
+                circle1TeleportedObject.add(wireframe1Mesh);
+                const wireframe2Material = new THREE.RingGeometry(0.99, 1.01, circleLines);
+                const wireframe2Mesh = new THREE.Mesh(wireframe2Material, new THREE.MeshBasicMaterial({
+                    color: guidata.circle2TeleportedColor,
+                    transparent: true,
+                    opacity: 0.8
+                }));
+                circle2TeleportedObject.add(wireframe2Mesh);
+            }
+        }
+        function updateVisualization() {
+            try {
+                const particleCount = meshHandle.get_particles_count();
+                const particlesPtr = meshHandle.get_particles_buffer();
+                const expectedParticlesVertices = particleCount * 3;
+                if (particlesObject.geometry.attributes.position.array.length !== expectedParticlesVertices) {
+                    scene.remove(particlesObject);
+                    scene.remove(particlesObject2);
+                    scene.remove(particlesObject4);
+                    createParticles();
+                }
+                copyWasmData(particlesPtr, particleDataArray, particleCount * 2);
+                if (guidata.draw_reflections) {
+                    const thirdCount = particleCount / 3;
+                    circle1TeleportedObject.visible = true;
+                    circle2TeleportedObject.visible = true;
+                    particlesObject.visible = true;
+                    particlesObject2.visible = true;
+                    particlesObject4.visible = true;
+                    const particlePositions = particlesObject.geometry.attributes.position.array;
+                    for (let i = 0; i < thirdCount; i++) {
+                        particlePositions[i * 3] = particleDataArray[i * 2];
+                        particlePositions[i * 3 + 1] = particleDataArray[i * 2 + 1];
+                        particlePositions[i * 3 + 2] = 0;
+                    }
+                    particlesObject.geometry.attributes.position.needsUpdate = true;
+                    const particlePositions2 = particlesObject2.geometry.attributes.position.array;
+                    for (let i = 0; i < thirdCount; i++) {
+                        const sourceIndex = Math.floor(thirdCount) + i;
+                        particlePositions2[i * 3] = particleDataArray[sourceIndex * 2];
+                        particlePositions2[i * 3 + 1] = particleDataArray[sourceIndex * 2 + 1];
+                        particlePositions2[i * 3 + 2] = 0;
+                    }
+                    particlesObject2.geometry.attributes.position.needsUpdate = true;
+                    const particlePositions4 = particlesObject4.geometry.attributes.position.array;
+                    for (let i = 0; i < thirdCount; i++) {
+                        const sourceIndex = Math.floor(thirdCount * 2) + i;
+                        particlePositions4[i * 3] = particleDataArray[sourceIndex * 2];
+                        particlePositions4[i * 3 + 1] = particleDataArray[sourceIndex * 2 + 1];
+                        particlePositions4[i * 3 + 2] = 0;
+                    }
+                    particlesObject4.geometry.attributes.position.needsUpdate = true;
+                } else {
+                    particlesObject.visible = true;
+                    const particlePositions = particlesObject.geometry.attributes.position.array;
+                    for (let i = 0; i < particleCount; i++) {
+                        particlePositions[i * 3] = particleDataArray[i * 2];
+                        particlePositions[i * 3 + 1] = particleDataArray[i * 2 + 1];
+                        particlePositions[i * 3 + 2] = 0;
+                    }
+                    particlesObject.geometry.attributes.position.needsUpdate = true;
+                    particlesObject2.visible = false;
+                    particlesObject4.visible = false;
+                    circle1TeleportedObject.visible = false;
+                    circle2TeleportedObject.visible = false;
+                }
+                const lineCount = meshHandle.get_lines_count();
+                const expectedLineVertices = lineCount * 2 * 3;
+                if (linesObject.geometry.attributes.position.array.length !== expectedLineVertices) {
+                    scene.remove(linesObject);
+                    scene.remove(linesObject2);
+                    scene.remove(linesObject4);
+                    createLines();
+                }
+                const linesPtr = meshHandle.get_lines_buffer();
+                const disabledLinesPtr = meshHandle.get_disable_lines_buffer();
+                copyWasmData(linesPtr, lineIndicesArray, lineCount * 2);
+                copyWasmData(disabledLinesPtr, disabledLinesArray, lineCount);
+                const linePositions = linesObject.geometry.attributes.position.array;
+                const linePositions2 = linesObject2.geometry.attributes.position.array;
+                const linePositions4 = linesObject4.geometry.attributes.position.array;
+                linesObject.visible = true;
+                linesObject2.visible = true;
+                linesObject4.visible = true;
+                for (let i = 0; i < lineCount; i++) {
+                    const idx1 = lineIndicesArray[i * 2];
+                    const idx2 = lineIndicesArray[i * 2 + 1];
+                    const lineType = disabledLinesArray[i];
+                    linePositions[i * 6] = 0;
+                    linePositions[i * 6 + 1] = 0;
+                    linePositions[i * 6 + 2] = 0;
+                    linePositions[i * 6 + 3] = 0;
+                    linePositions[i * 6 + 4] = 0;
+                    linePositions[i * 6 + 5] = 0;
+                    linePositions2[i * 6] = 0;
+                    linePositions2[i * 6 + 1] = 0;
+                    linePositions2[i * 6 + 2] = 0;
+                    linePositions2[i * 6 + 3] = 0;
+                    linePositions2[i * 6 + 4] = 0;
+                    linePositions2[i * 6 + 5] = 0;
+                    linePositions4[i * 6] = 0;
+                    linePositions4[i * 6 + 1] = 0;
+                    linePositions4[i * 6 + 2] = 0;
+                    linePositions4[i * 6 + 3] = 0;
+                    linePositions4[i * 6 + 4] = 0;
+                    linePositions4[i * 6 + 5] = 0;
+                    if (lineType === 1 || lineType === 3 || lineType === 5) {
+                        continue;
+                    } else if (lineType === 0) {
+                        linePositions[i * 6] = particleDataArray[idx1 * 2];
+                        linePositions[i * 6 + 1] = particleDataArray[idx1 * 2 + 1];
+                        linePositions[i * 6 + 2] = 0;
+                        linePositions[i * 6 + 3] = particleDataArray[idx2 * 2];
+                        linePositions[i * 6 + 4] = particleDataArray[idx2 * 2 + 1];
+                        linePositions[i * 6 + 5] = 0;
+                    } else if (lineType === 2) {
+                        linePositions2[i * 6] = particleDataArray[idx1 * 2];
+                        linePositions2[i * 6 + 1] = particleDataArray[idx1 * 2 + 1];
+                        linePositions2[i * 6 + 2] = 0;
+                        linePositions2[i * 6 + 3] = particleDataArray[idx2 * 2];
+                        linePositions2[i * 6 + 4] = particleDataArray[idx2 * 2 + 1];
+                        linePositions2[i * 6 + 5] = 0;
+                    } else if (lineType === 4) {
+                        linePositions4[i * 6] = particleDataArray[idx1 * 2];
+                        linePositions4[i * 6 + 1] = particleDataArray[idx1 * 2 + 1];
+                        linePositions4[i * 6 + 2] = 0;
+                        linePositions4[i * 6 + 3] = particleDataArray[idx2 * 2];
+                        linePositions4[i * 6 + 4] = particleDataArray[idx2 * 2 + 1];
+                        linePositions4[i * 6 + 5] = 0;
+                    }
+                }
+                linesObject.geometry.attributes.position.needsUpdate = true;
+                linesObject2.geometry.attributes.position.needsUpdate = true;
+                linesObject4.geometry.attributes.position.needsUpdate = true;
+                updateCircles();
+            } catch (error) {
+                console.error("Ошибка обновления визуализации:", error);
+            }
+        }
+        function updateCircles() {
+            try {
+                const circle1Ptr = meshHandle.get_circle1_data();
+                copyWasmData(circle1Ptr, circle1DataArray, 3);
+                circle1Object.position.set(circle1DataArray[0], circle1DataArray[1], 0);
+                circle1Object.scale.set(circle1DataArray[2], circle1DataArray[2], 1);
+                const circle2Ptr = meshHandle.get_circle2_data();
+                copyWasmData(circle2Ptr, circle2DataArray, 3);
+                circle2Object.position.set(circle2DataArray[0], circle2DataArray[1], 0);
+                circle2Object.scale.set(circle2DataArray[2], circle2DataArray[2], 1);
+                const circle1TeleportedPtr = meshHandle.get_circle1_teleported_data();
+                copyWasmData(circle1TeleportedPtr, circle1DataArray, 3);
+                circle1TeleportedObject.position.set(circle1DataArray[0], circle1DataArray[1], 0);
+                circle1TeleportedObject.scale.set(circle1DataArray[2], circle1DataArray[2], 1);
+                const circle2TeleportedPtr = meshHandle.get_circle2_teleported_data();
+                copyWasmData(circle2TeleportedPtr, circle2DataArray, 3);
+                circle2TeleportedObject.position.set(circle2DataArray[0], circle2DataArray[1], 0);
+                circle2TeleportedObject.scale.set(circle2DataArray[2], circle2DataArray[2], 1);
+            } catch (error) {
+                console.error("Ошибка обновления кругов:", error);
+            }
+        }
+        function setupGUI() {
+            const gui = new dat.GUI();
+            gui.add(guidata, "run_simulation").name("Запустить симуляцию");
+            gui.add(guidata, "scene", Object.keys(scenes)).onChange(value => {
+                initScene();
+            }).name("Scene");
+            var obj = { add:function(){
+                meshHandle.init();
+                updateVisualization();
+            }};
+            gui.add(obj,'add').name("Reset");
+            gui.add(guidata, "showDebugGrid").onChange(value => {
+                gridHelper.visible = value;
+                axesHelper.visible = value;
+                coordinateLabels.forEach(label => label.visible = value);
+                if (value) {
+                    createCoordinateLabels();
+                }
+            }).name("Показать сетку отладки");
+            gui.add(guidata, "draw_reflections").onChange(value => {
+                meshHandle.set_constant("draw_reflections", (+value) + 0.0);
+                updateVisualization();
+            }).name("Рисуем отражения").listen();
+            const visualFolder = gui.addFolder("Визуальные настройки");
+            visualFolder.add(guidata, "particleSize", 0.0, 10.0, 0.01).onChange(value => {
+                particlesObject.material.size = value;
+                particlesObject2.material.size = value;
+                particlesObject4.material.size = value;
+            }).listen();
+            visualFolder.addColor(guidata, "particleColor").onChange(value => {
+                particlesObject.material.color.set(value);
+                linesObject.material.color.set(value);
+            }).listen();
+            visualFolder.addColor(guidata, "line2Color").onChange(value => {
+                particlesObject2.material.color.set(value);
+                linesObject2.material.color.set(value);
+            }).listen();
+            visualFolder.addColor(guidata, "line4Color").onChange(value => {
+                particlesObject4.material.color.set(value);
+                linesObject4.material.color.set(value);
+            }).listen();
+            visualFolder.addColor(guidata, "circle1Color").onChange(value => {
+                circle1Object.material.color.set(value);
+                circle1Object.children[0].material.color.set(value);
+                circle1TeleportedObject.material.color.set(value);
+                circle1TeleportedObject.children[0].material.color.set(value);
+            }).listen();
+            visualFolder.addColor(guidata, "circle2Color").onChange(value => {
+                circle2Object.material.color.set(value);
+                circle2Object.children[0].material.color.set(value);
+                circle2TeleportedObject.material.color.set(value);
+                circle2TeleportedObject.children[0].material.color.set(value);
+            }).listen();
+            const physicsFolder = gui.addFolder("Физические параметры");
+            const sceneFolder = gui.addFolder("Параметры сцены");
+            for (const name in constants) {
+                const value = constants[name];
+                let min, max, step, label;
+                let clamps = {
+                    "iterations": [1, 30, 1, "Iters"],
+                    "edgeSpringConstant": [0, 1000, 1, "Пружинная сила"],
+                    "dt": [0.0001, 0.1, 0.0001, "Δt"],
+                    "dampingCoefficient": [0, 50, 0.1, "Пружинное демпфирование"],
+                    "globalDamping": [0, 5, 0.01, "Демпфирование скорости"],
+                    "scene_size": [0, 120, 1, "Размер сетки"],
+                    "scene_scale": [0.01, 10., 0.01, "Scale"],
+                    "scene_offset_x": [-5, 5, 0.01, "Offset.x"],
+                    "scene_offset_y": [-5, 5, 0.01, "Offset.y"],
+                    "scene_speed_x": [-5, 5, 0.01, "Speed.x"],
+                    "scene_speed_y": [-5, 5, 0.01, "Speed.y"],
+                    "scene_portal_type": [0, 2, 1, "Тип портала"],
+                    "scene_portal1_x": [-5, 5, 0.01, "Portal1.x"],
+                    "scene_portal1_y": [-5, 5, 0.01, "Portal1.y"],
+                    "scene_portal1_angle": [0, 2., 0.01, "Portal1.angle"],
+                    "scene_portal2_x": [-5, 5, 0.01, "Portal2.x"],
+                    "scene_portal2_y": [-5, 5, 0.01, "Portal2.y"],
+                    "scene_portal2_angle": [0, 2., 0.01, "Portal2.angle"],
+                    "scene_mirror_portals": [0, 1, 1, "Зеркальные порталы"],
+                };
+                if (name in clamps) {
+                    min = clamps[name][0];
+                    max = clamps[name][1];
+                    step = clamps[name][2];
+                    label = clamps[name][3];
+                } else {
+                    min = 0;
+                    max = 5;
+                    step = 0.01;
+                    label = name;
+                }
+                if (name.startsWith("scene_")) {
+                    sceneFolder.add(constants, name, min, max, step).onChange(value => {
+                        meshHandle.set_constant(name, value);
+                        updateVisualization();
+                    }).name(label).listen();
+                } else {
+                    physicsFolder.add(constants, name, min, max, step).onChange(value => {
+                        if (name !== "iterations") {
+                            meshHandle.set_constant(name, value);
+                        }
+                    }).name(label).listen();
+                }
+            }
+            physicsFolder.open();
+            sceneFolder.open();
+        }
+        function updateCameraScale(scale) {
+            const aspect = window.innerWidth / window.innerHeight;
+            camera.left = -scale * aspect / 2;
+            camera.right = scale * aspect / 2;
+            camera.top = scale / 2;
+            camera.bottom = -scale / 2;
+            camera.updateProjectionMatrix();
+        }
+        function onWindowResize() {
+            updateCameraScale(guidata.cameraScale);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        function animate() {
+            requestAnimationFrame(animate);
+            try {
+                if (guidata.run_simulation) {
+                    for (let i = 0; i < constants.iterations; i++) {
+                        meshHandle.step();
+                    }
+                    updateVisualization();
+                }
+                controls.update();
+                renderer.render(scene, camera);
+            } catch (error) {
+                console.error("Ошибка в цикле анимации:", error);
+            }
+        }
+        init2().catch(console.error);
+    </script>
+</body>
+</html>
